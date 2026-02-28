@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Staff Recognition App</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <h1>Staff Recognition</h1>
+  <button id="loginBtn">Login with Google</button>
+  <div id="adminPanel" class="hidden">
+    <h2>Admin Panel</h2>
+    <input type="text" id="teacherName" placeholder="Teacher Name" />
+    <input type="email" id="teacherEmail" placeholder="Teacher Email" />
+    <button id="addTeacherBtn">Add Teacher</button>
+    <input type="text" id="prizeName" placeholder="Prize Name" />
+    <input type="number" id="prizeCost" placeholder="Prize Cost" />
+    <button id="addPrizeBtn">Add Prize</button>
+  </div>
+  <div id="recognitionPanel" class="hidden">
+    <h2>Recognize a Teacher</h2>
+    <select id="recipientSelect"></select>
+    <input type="text" id="messageInput" placeholder="Message" />
+    <input type="number" id="pointsInput" placeholder="Points" />
+    <button id="sendRecognitionBtn">Send Recognition</button>
+  </div>
+  <div id="prizePanel" class="hidden">
+    <h2>Redeem a Prize</h2>
+    <select id="prizeSelect"></select>
+    <button id="redeemPrizeBtn">Redeem</button>
+  </div>
+  <script type="module" src="script.js"></script>
+</body>
+</html>
