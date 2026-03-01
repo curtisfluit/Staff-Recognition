@@ -928,13 +928,6 @@ async function renderForUser(firebaseUser) {
     }
   }
 
-  if (!teacher) {
-    toast("Your account is not approved yet. Please ask the admin to add your teacher email first.");
-    renderHeader(null);
-    await forceLogoutToAuthView();
-    return;
-  }
-
   saveData(data);
 
   authView.classList.add("hidden");
@@ -955,3 +948,4 @@ if (initFirebaseIfConfigured()) {
     // no-op
   });
 }
+
