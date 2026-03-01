@@ -1,81 +1,957 @@
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-import { getFirestore, collection, addDoc, onSnapshot, doc, getDoc } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
-import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+const STORAGE_KEY = "staffRecognitionData";
+const ADMIN_EMAIL = "cfluit29@plymouthchristian.us";
 
-const firebaseConfig = window.FIRE;
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
-const auth = getAuth(app);
-const provider = new GoogleAuthProvider();
+const defaultData = {
+  teachers: [],
+  recognitions: [],
+  redemptions: [],
+  settings: { defaultBankPoints: 50 },
+  prizes: [],
+};
 
-const loginBtn = document.getElementById("loginBtn");
-const adminPanel = document.getElementById("adminPanel");
-const recognitionPanel = document.getElementById("recognitionPanel");
-const prizePanel = document.getElementById("prizePanel");
+const authView = document.getElementById("authView");
+const dashboardView = document.getElementById("dashboardView");
+const authActions = document.getElementById("authActions");
 
-loginBtn.onclick = () => signInWithPopup(auth, provider);
+let firebaseReady = false;
+let firestoreReady = false;
+let addTeacherInFlight = false;
 
-onAuthStateChanged(auth, async (user) => {
-  if (!user) return;
 
-  const teacherSnap = await getDoc(doc(db, "teachers", user.uid));
-  const teacherData = teacherSnap.exists() ? teacherSnap.data() : null;
+function loadFirebaseConfig() {
+  return window.FIREBASE_CONFIG || null;
+}
 
-  if (teacherData?.isAdmin) adminPanel.classList.remove("hidden");
-  recognitionPanel.classList.remove("hidden");
-  prizePanel.classList.remove("hidden");
+function hasValidFirebaseConfig(config) {
+  return !!config && ["apiKey", "authDomain", "projectId", "appId"].every((key) => !!config[key]);
+}
 
-  setupListeners();
-});
+function initFirebaseIfConfigured() {
+  if (window.location.protocol === "file:") {
+    return false;
+  }
 
-function setupListeners() {
-  onSnapshot(collection(db, "teachers"), (snap) => {
-    const select = document.getElementById("recipientSelect");
-    select.innerHTML = "";
-    snap.forEach(doc => {
-      const data = doc.data();
-      const option = document.createElement("option");
-      option.value = doc.id;
-      option.textContent = data.name;
-      select.appendChild(option);
+  if (firebase.apps.length > 0) {
+    firebaseReady = true;
+    try {
+      firestoreReady = !!firebase.firestore;
+    } catch {
+      firestoreReady = false;
+    }
+    return true;
+  }
+
+  const config = loadFirebaseConfig();
+  if (!hasValidFirebaseConfig(config)) {
+    return false;
+  }
+
+  firebase.initializeApp(config);
+  firebaseReady = true;
+  try {
+    firestoreReady = !!firebase.firestore;
+  } catch {
+    firestoreReady = false;
+  }
+  return true;
+}
+
+function teacherDocId(email) {
+  return encodeURIComponent(normalizeEmail(email));
+}
+
+async function saveTeacherToCloud(teacher) {
+  if (!firebaseReady || !firestoreReady) {
+    return false;
+  }
+  await firebase.firestore().collection("teachers").doc(teacherDocId(teacher.email)).set({
+    name: teacher.name,
+    email: normalizeEmail(teacher.email),
+    isAdmin: Boolean(teacher.isAdmin),
+    updatedAt: new Date().toISOString(),
+  }, { merge: true });
+  return true;
+}
+
+async function saveTeacherToCloudWithTimeout(teacher, timeoutMs = 4000) {
+  const timeoutPromise = new Promise((resolve) => {
+    setTimeout(() => resolve({ status: "timeout" }), timeoutMs);
+  });
+
+  const savePromise = saveTeacherToCloud(teacher)
+    .then((saved) => (saved ? { status: "saved" } : { status: "inactive" }))
+    .catch((error) => ({ status: "error", message: error?.message || "Unknown cloud sync error." }));
+
+  return Promise.race([savePromise, timeoutPromise]);
+}
+
+async function syncTeacherToCloudInBackground(data, teacher, { retries = 3 } = {}) {
+  if (!teacher) {
+    return { status: "missing" };
+  }
+
+  if (!firebaseReady || !firestoreReady) {
+    teacher.cloudSync = "failed";
+    saveData(data);
+    return { status: "inactive" };
+  }
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      await saveTeacherToCloud(teacher);
+      teacher.cloudSync = "synced";
+      saveData(data);
+      return { status: "saved" };
+    } catch (error) {
+      if (attempt < retries) {
+        const backoffMs = 800 * (attempt + 1);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        continue;
+      }
+
+      teacher.cloudSync = "failed";
+      saveData(data);
+      return { status: "error", message: error?.message || "Unknown cloud sync error." };
+    }
+  }
+
+  return { status: "error", message: "Unknown cloud sync error." };
+}
+
+async function removeTeacherFromCloud(email) {
+  if (!firebaseReady || !firestoreReady) {
+    return false;
+  }
+  await firebase.firestore().collection("teachers").doc(teacherDocId(email)).delete();
+  return true;
+}
+
+async function loadTeacherFromCloud(email) {
+  if (!firebaseReady || !firestoreReady) {
+    return null;
+  }
+  const teachersCollection = firebase.firestore().collection("teachers");
+  const snapshot = await teachersCollection.doc(teacherDocId(email)).get();
+  if (snapshot.exists) {
+    return snapshot.data();
+  }
+
+  const normalizedEmail = normalizeEmail(email);
+  const querySnapshot = await teachersCollection.where("email", "==", normalizedEmail).limit(1).get();
+  if (querySnapshot.empty) {
+    return null;
+  }
+
+  return querySnapshot.docs[0].data();
+}
+
+async function loadAllTeachersFromCloud() {
+  if (!firebaseReady || !firestoreReady) {
+    return [];
+  }
+
+  const snapshot = await firebase.firestore().collection("teachers").get();
+  return snapshot.docs.map((doc) => doc.data()).filter((item) => item && item.email);
+}
+
+async function loadTeacherFromCloudWithTimeout(email, timeoutMs = 5000) {
+  const timeoutPromise = new Promise((resolve) => {
+    setTimeout(() => resolve({ status: "timeout", teacher: null }), timeoutMs);
+  });
+
+  const lookupPromise = loadTeacherFromCloud(email)
+    .then((teacher) => {
+      if (teacher) {
+        return { status: "found", teacher };
+      }
+      return { status: "not_found", teacher: null };
+    })
+    .catch(() => ({ status: "error", teacher: null }));
+
+  return Promise.race([lookupPromise, timeoutPromise]);
+}
+
+function migrateTeacher(teacher, defaultBankPoints) {
+  if (typeof teacher.bankPoints !== "number") {
+    teacher.bankPoints = defaultBankPoints;
+  }
+  if (typeof teacher.earnedPoints !== "number") {
+    teacher.earnedPoints = typeof teacher.points === "number" ? teacher.points : 0;
+  }
+  delete teacher.points;
+}
+
+function loadData() {
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if (!raw) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(defaultData));
+    return structuredClone(defaultData);
+  }
+
+  const parsed = JSON.parse(raw);
+  parsed.settings = parsed.settings || {};
+  if (typeof parsed.settings.defaultBankPoints !== "number") {
+    parsed.settings.defaultBankPoints = typeof parsed.settings.defaultNewTeacherPoints === "number"
+      ? parsed.settings.defaultNewTeacherPoints
+      : 50;
+  }
+
+  parsed.teachers = parsed.teachers || [];
+  parsed.prizes = parsed.prizes || [];
+  parsed.recognitions = parsed.recognitions || [];
+  parsed.redemptions = parsed.redemptions || [];
+
+  parsed.teachers.forEach((teacher) => {
+    teacher.email = normalizeEmail(teacher.email);
+    if (!["pending", "synced", "failed"].includes(teacher.cloudSync)) {
+      teacher.cloudSync = "synced";
+    }
+    migrateTeacher(teacher, parsed.settings.defaultBankPoints);
+  });
+  parsed.redemptions.forEach((redemption) => {
+    if (typeof redemption.fulfilled !== "boolean") {
+      redemption.fulfilled = false;
+    }
+  });
+  delete parsed.settings.defaultNewTeacherPoints;
+  return parsed;
+}
+
+function saveData(data) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+}
+
+function toast(message) {
+  window.alert(message);
+}
+
+function normalizeEmail(value) {
+  return (value || "").trim().toLowerCase();
+}
+
+function findTeacherByEmail(teachers, email) {
+  const normalized = normalizeEmail(email);
+  return teachers.find((item) => normalizeEmail(item.email) === normalized) || null;
+}
+
+function createTeacher(data, { name, email }) {
+  const teacher = {
+    id: Date.now() + Math.floor(Math.random() * 9999),
+    name,
+    email,
+    bankPoints: data.settings.defaultBankPoints,
+    earnedPoints: 0,
+    isAdmin: email === ADMIN_EMAIL,
+    cloudSync: "pending",
+  };
+  data.teachers.push(teacher);
+  return teacher;
+}
+
+function upsertLocalTeacherFromCloud(data, cloudTeacher) {
+  const email = normalizeEmail(cloudTeacher.email);
+  let teacher = findTeacherByEmail(data.teachers, email);
+  if (!teacher) {
+    teacher = createTeacher(data, {
+      name: cloudTeacher.name || email.split("@")[0] || "Teacher",
+      email,
+    });
+  }
+  teacher.name = cloudTeacher.name || teacher.name;
+  teacher.email = email;
+  teacher.isAdmin = Boolean(cloudTeacher.isAdmin) || email === ADMIN_EMAIL;
+  teacher.cloudSync = "synced";
+  migrateTeacher(teacher, data.settings.defaultBankPoints);
+  return teacher;
+}
+
+function ensureTeacherRecord(data, firebaseUser) {
+  const email = normalizeEmail(firebaseUser.email);
+  const name = (firebaseUser.displayName || email.split("@")[0] || "Teacher").trim();
+  let teacher = findTeacherByEmail(data.teachers, email);
+
+  if (teacher) {
+    teacher.name = name;
+    teacher.isAdmin = Boolean(teacher.isAdmin) || email === ADMIN_EMAIL;
+    migrateTeacher(teacher, data.settings.defaultBankPoints);
+  }
+
+  return teacher;
+}
+
+function activateTab(tabName) {
+  document.querySelectorAll(".tab-btn[data-tab]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.tab === tabName);
+  });
+
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    panel.classList.toggle("hidden", panel.id !== `tab-${tabName}`);
+  });
+}
+
+function initTabs(isAdmin) {
+  const adminTabBtn = document.getElementById("adminTabBtn");
+  adminTabBtn.classList.toggle("hidden", !isAdmin);
+
+  document.querySelectorAll(".tab-btn[data-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!isAdmin && button.dataset.tab === "admin") {
+        return;
+      }
+      activateTab(button.dataset.tab);
     });
   });
 
-  onSnapshot(collection(db, "prizes"), (snap) => {
-    const select = document.getElementById("prizeSelect");
-    select.innerHTML = "";
-    snap.forEach(doc => {
-      const data = doc.data();
-      const option = document.createElement("option");
-      option.value = doc.id;
-      option.textContent = `${data.name} (${data.cost} pts)`;
-      select.appendChild(option);
+  activateTab("recognize");
+}
+
+function renderAuth() {
+  authView.innerHTML = document.getElementById("authTemplate").innerHTML;
+
+  const hostNotice = document.getElementById("hostNotice");
+  if (window.location.protocol === "file:") {
+    hostNotice.classList.remove("hidden");
+    hostNotice.textContent = "Use a web URL like localhost to sign in with Google. Opening the file directly will not work.";
+  }
+
+  document.getElementById("googleLoginBtn").addEventListener("click", async () => {
+    if (!firebaseReady) {
+      toast("Firebase is not configured for this deployment. Update firebase-config.js and redeploy Netlify.");
+      return;
+    }
+
+    try {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      await firebase.auth().signInWithPopup(provider);
+    } catch (error) {
+      toast(`Login failed: ${error.message}`);
+    }
+  });
+}
+
+async function forceLogoutToAuthView() {
+  dashboardView.classList.add("hidden");
+  authView.classList.remove("hidden");
+  renderAuth();
+  try {
+    await firebase.auth().signOut();
+  } catch {
+    // no-op: auth UI is already shown and user can retry.
+  }
+}
+
+function renderHeader(firebaseUser) {
+  if (!firebaseUser) {
+    authActions.innerHTML = "";
+    return;
+  }
+
+  authActions.innerHTML = `<button class="pill" id="logoutBtn">Logout</button>`;
+  document.getElementById("logoutBtn").addEventListener("click", async () => {
+    await firebase.auth().signOut();
+  });
+}
+
+
+function openEditModal({ title, fields, onSubmit, saveLabel = "Save" }) {
+  const modal = document.getElementById("editModal");
+  const titleEl = document.getElementById("editModalTitle");
+  const fieldsWrap = document.getElementById("editModalFields");
+  const form = document.getElementById("editModalForm");
+  const cancelBtn = document.getElementById("editModalCancelBtn");
+  const saveBtn = document.getElementById("editModalSaveBtn");
+
+  titleEl.textContent = title;
+  saveBtn.textContent = saveLabel;
+  fieldsWrap.innerHTML = fields
+    .map(
+      (field) => `<label>
+        ${field.label}
+        <input id="modal-${field.name}" type="${field.type || "text"}" value="${String(field.value ?? "").replace(/"/g, "&quot;")}" ${field.min !== undefined ? `min="${field.min}"` : ""} ${field.required ? "required" : ""} />
+      </label>`
+    )
+    .join("");
+
+  const close = () => {
+    modal.classList.add("hidden");
+    form.onsubmit = null;
+    cancelBtn.onclick = null;
+  };
+
+  cancelBtn.onclick = close;
+  modal.classList.remove("hidden");
+
+  form.onsubmit = (event) => {
+    event.preventDefault();
+    const values = Object.fromEntries(fields.map((field) => [field.name, document.getElementById(`modal-${field.name}`).value]));
+    const shouldClose = onSubmit(values);
+    if (shouldClose !== false) {
+      close();
+    }
+  };
+}
+
+function activateAdminTab(tabName) {
+  document.querySelectorAll(".admin-tab-btn").forEach((button) => {
+    button.classList.toggle("active", button.dataset.adminTab === tabName);
+  });
+
+  document.querySelectorAll(".admin-panel-section").forEach((section) => {
+    section.classList.toggle("hidden", section.id !== `admin-${tabName}`);
+  });
+}
+
+function renderAdmin(data, teacher) {
+  if (!teacher.isAdmin) {
+    return;
+  }
+
+  document.querySelectorAll(".admin-tab-btn").forEach((button) => {
+    button.onclick = () => activateAdminTab(button.dataset.adminTab);
+  });
+  activateAdminTab("teachers");
+
+  document.getElementById("addTeacherForm").onsubmit = async (event) => {
+    event.preventDefault();
+    if (addTeacherInFlight) {
+      return;
+    }
+
+    const name = document.getElementById("teacherName").value.trim();
+    const email = normalizeEmail(document.getElementById("teacherEmail").value);
+    const submitBtn = event.target.querySelector('button[type="submit"]');
+
+    if (!name || !email.includes("@")) {
+      toast("Please enter a valid teacher name and email.");
+      return;
+    }
+
+    const resetSubmitButton = () => {
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Add teacher";
+      }
+      addTeacherInFlight = false;
+    };
+
+    addTeacherInFlight = true;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Adding...";
+    }
+
+    const localDuplicate = findTeacherByEmail(data.teachers, email);
+    if (localDuplicate) {
+      resetSubmitButton();
+      toast("That teacher email already exists.");
+      return;
+    }
+
+    const newTeacher = createTeacher(data, { name, email });
+    newTeacher.isAdmin = email === ADMIN_EMAIL;
+    newTeacher.cloudSync = "pending";
+
+    saveData(data);
+    event.target.reset();
+    resetSubmitButton();
+    toast(`Teacher added instantly with ${data.settings.defaultBankPoints} bank points.`);
+    renderDashboard(data, teacher);
+    activateTab("admin");
+    activateAdminTab("teachers");
+
+    syncTeacherToCloudInBackground(data, newTeacher, { retries: 3 })
+      .then((result) => {
+        if (result.status === "inactive") {
+          toast("Teacher added locally. Firestore sync is not active, so other devices will not see this teacher yet.");
+        } else if (result.status === "error") {
+          toast(`Teacher added locally, but Firestore sync failed: ${result.message}`);
+        }
+      })
+      .finally(() => {
+        renderDashboard(data, teacher);
+        activateTab("admin");
+        activateAdminTab("teachers");
+      });
+  };
+
+
+
+  const teacherList = document.getElementById("adminTeacherList");
+  teacherList.innerHTML = data.teachers
+    .map(
+      (item) => `<li class="list-item queue-item">
+        <div>
+          <strong>${item.name}</strong> (${item.email})
+          <br /><small>${item.isAdmin ? "Admin • " : ""}Bank: ${item.bankPoints} • Earned: ${item.earnedPoints}${item.cloudSync === "pending" ? " • Syncing..." : item.cloudSync === "failed" ? " • Sync failed" : ""}</small>
+        </div>
+        <div class="row">
+          ${item.cloudSync === "failed" ? `<button type="button" class="pill" data-resync-teacher="${item.id}">Retry Sync</button>` : ""}
+          <button type="button" class="pill" data-edit-teacher="${item.id}">Edit</button>
+          <button type="button" class="pill" data-toggle-admin="${item.id}">${item.isAdmin ? "Remove Admin" : "Make Admin"}</button>
+          <button type="button" class="pill" data-delete-teacher="${item.id}">Delete</button>
+        </div>
+      </li>`
+    )
+    .join("");
+
+  teacherList.querySelectorAll("button[data-resync-teacher]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = Number(button.dataset.resyncTeacher);
+      const teacherToResync = data.teachers.find((t) => t.id === id);
+      if (!teacherToResync) {
+        return;
+      }
+
+      teacherToResync.cloudSync = "pending";
+      saveData(data);
+      renderDashboard(data, teacher);
+      activateTab("admin");
+      activateAdminTab("teachers");
+
+      syncTeacherToCloudInBackground(data, teacherToResync, { retries: 3 })
+        .then((result) => {
+          if (result.status === "saved") {
+            toast("Teacher sync completed.");
+          } else {
+            toast("Teacher sync could not complete right now.");
+          }
+        })
+        .finally(() => {
+          renderDashboard(data, teacher);
+          activateTab("admin");
+          activateAdminTab("teachers");
+        });
+    });
+  });
+
+  teacherList.querySelectorAll("button[data-edit-teacher]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = Number(button.dataset.editTeacher);
+      const teacherToEdit = data.teachers.find((t) => t.id === id);
+      if (!teacherToEdit) {
+        return;
+      }
+
+      openEditModal({
+        title: "Edit Teacher",
+        fields: [
+          { name: "name", label: "Teacher name", value: teacherToEdit.name, required: true },
+          { name: "email", label: "Teacher email", value: teacherToEdit.email, type: "email", required: true },
+          { name: "bank", label: "Bank points", value: teacherToEdit.bankPoints, type: "number", min: 0, required: true },
+          { name: "earned", label: "Earned points", value: teacherToEdit.earnedPoints, type: "number", min: 0, required: true },
+        ],
+        onSubmit: (values) => {
+          const normalizedEmail = normalizeEmail(values.email);
+          if (!normalizedEmail.includes("@")) {
+            toast("Please enter a valid email.");
+            return false;
+          }
+
+          const duplicate = data.teachers.find((t) => t.email === normalizedEmail && t.id !== teacherToEdit.id);
+          if (duplicate) {
+            toast("Another teacher already has that email.");
+            return false;
+          }
+
+          const bankVal = Number(values.bank);
+          const earnedVal = Number(values.earned);
+          if (Number.isNaN(bankVal) || bankVal < 0 || Number.isNaN(earnedVal) || earnedVal < 0) {
+            toast("Bank and earned points must be 0 or greater.");
+            return false;
+          }
+
+          teacherToEdit.name = values.name.trim() || teacherToEdit.name;
+          teacherToEdit.email = normalizedEmail;
+          teacherToEdit.bankPoints = bankVal;
+          teacherToEdit.earnedPoints = earnedVal;
+          teacherToEdit.isAdmin = Boolean(teacherToEdit.isAdmin) || teacherToEdit.email === ADMIN_EMAIL;
+          saveData(data);
+          saveTeacherToCloud(teacherToEdit).catch(() => {
+            toast("Teacher updated locally, but cloud sync failed.");
+          });
+          renderDashboard(data, teacher);
+          activateTab("admin");
+          activateAdminTab("teachers");
+          return true;
+        },
+      });
+    });
+  });
+
+  teacherList.querySelectorAll("button[data-toggle-admin]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = Number(button.dataset.toggleAdmin);
+      const teacherToToggle = data.teachers.find((t) => t.id === id);
+      if (!teacherToToggle) {
+        return;
+      }
+
+      if (teacherToToggle.email === ADMIN_EMAIL && teacherToToggle.isAdmin) {
+        toast("Primary admin cannot be removed from admin role.");
+        return;
+      }
+
+      teacherToToggle.isAdmin = !teacherToToggle.isAdmin;
+      saveData(data);
+      saveTeacherToCloud(teacherToToggle).catch(() => {
+        toast("Admin role updated locally, but cloud sync failed.");
+      });
+      renderDashboard(data, teacher);
+      activateTab("admin");
+      activateAdminTab("teachers");
+    });
+  });
+
+
+  teacherList.querySelectorAll("button[data-delete-teacher]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = Number(button.dataset.deleteTeacher);
+      const teacherToDelete = data.teachers.find((t) => t.id === id);
+      if (!teacherToDelete) {
+        return;
+      }
+
+      if (teacherToDelete.id === teacher.id) {
+        toast("You cannot delete your own account while signed in.");
+        return;
+      }
+
+      const confirmed = window.confirm(`Delete ${teacherToDelete.name}? This also removes their recognitions and redemptions.`);
+      if (!confirmed) {
+        return;
+      }
+
+      data.teachers = data.teachers.filter((t) => t.id !== id);
+      data.recognitions = data.recognitions.filter((item) => item.giverId !== id && item.receiverId !== id);
+      data.redemptions = data.redemptions.filter((item) => item.teacherId !== id);
+      saveData(data);
+      removeTeacherFromCloud(teacherToDelete.email).catch(() => {
+        toast("Teacher deleted locally, but cloud sync failed.");
+      });
+      renderDashboard(data, teacher);
+      activateTab("admin");
+      activateAdminTab("teachers");
+    });
+  });
+
+  document.getElementById("addPrizeForm").onsubmit = (event) => {
+    event.preventDefault();
+    const name = document.getElementById("prizeName").value.trim();
+    const description = document.getElementById("prizeDescription").value.trim();
+    const cost = Number(document.getElementById("prizeCost").value);
+
+    if (!name || !description || Number.isNaN(cost) || cost <= 0) {
+      toast("Prize fields must be valid and cost must be greater than 0.");
+      return;
+    }
+
+    data.prizes.push({ id: Date.now(), name, description, cost });
+    saveData(data);
+    event.target.reset();
+    toast("Prize added.");
+    renderDashboard(data, teacher);
+    activateTab("admin");
+    activateAdminTab("prizes");
+  };
+
+  const prizeListAdmin = document.getElementById("adminPrizeList");
+  prizeListAdmin.innerHTML = data.prizes.length
+    ? data.prizes
+        .map(
+          (prize) => `<li class="list-item queue-item">
+            <div>
+              <strong>${prize.name}</strong> (${prize.cost} pts)
+              <br /><small>${prize.description}</small>
+            </div>
+            <div class="row">
+              <button type="button" class="pill" data-edit-prize="${prize.id}">Edit</button>
+              <button type="button" class="pill" data-delete-prize="${prize.id}">Delete</button>
+            </div>
+          </li>`
+        )
+        .join("")
+    : '<li class="list-item">No prizes yet.</li>';
+
+  prizeListAdmin.querySelectorAll("button[data-edit-prize]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = Number(button.dataset.editPrize);
+      const prize = data.prizes.find((p) => p.id === id);
+      if (!prize) return;
+
+      openEditModal({
+        title: "Edit Prize",
+        fields: [
+          { name: "name", label: "Prize name", value: prize.name, required: true },
+          { name: "description", label: "Prize description", value: prize.description, required: true },
+          { name: "cost", label: "Prize cost", value: prize.cost, type: "number", min: 1, required: true },
+        ],
+        onSubmit: (values) => {
+          const costVal = Number(values.cost);
+          if (!values.name.trim() || !values.description.trim() || Number.isNaN(costVal) || costVal <= 0) {
+            toast("Prize values are invalid.");
+            return false;
+          }
+
+          prize.name = values.name.trim();
+          prize.description = values.description.trim();
+          prize.cost = costVal;
+          saveData(data);
+          renderDashboard(data, teacher);
+          activateTab("admin");
+          activateAdminTab("prizes");
+          return true;
+        },
+      });
+    });
+  });
+
+  prizeListAdmin.querySelectorAll("button[data-delete-prize]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = Number(button.dataset.deletePrize);
+      data.prizes = data.prizes.filter((p) => p.id !== id);
+      saveData(data);
+      renderDashboard(data, teacher);
+      activateTab("admin");
+      activateAdminTab("prizes");
+    });
+  });
+
+  const queue = document.getElementById("adminRedemptionQueue");
+  const pending = data.redemptions.filter((item) => !item.fulfilled);
+  queue.innerHTML = pending.length
+    ? pending
+        .map((item, index) => {
+          const prize = data.prizes.find((prizeItem) => prizeItem.id === item.prizeId);
+          const teacherItem = data.teachers.find((teacherInfo) => teacherInfo.id === item.teacherId);
+          return `<li class="list-item queue-item">
+            <div>
+              <strong>${teacherItem?.name || "Teacher"}</strong> redeemed ${prize?.name || "Prize"}
+              <br /><small>${item.cost} points • ${item.date}</small>
+            </div>
+            <button type="button" class="pill check-btn" data-queue-index="${index}" aria-label="mark fulfilled">✓</button>
+          </li>`;
+        })
+        .join("")
+    : '<li class="list-item">No pending prizes to hand out.</li>';
+
+  queue.querySelectorAll("button[data-queue-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const pendingIndex = Number(button.dataset.queueIndex);
+      const redemption = pending[pendingIndex];
+      if (!redemption) {
+        return;
+      }
+      redemption.fulfilled = true;
+      redemption.fulfilledAt = new Date().toLocaleString();
+      saveData(data);
+      renderDashboard(data, teacher);
+      activateTab("admin");
+      activateAdminTab("redemptions");
     });
   });
 }
 
-document.getElementById("addTeacherBtn").onclick = async () => {
-  const name = document.getElementById("teacherName").value;
-  const email = document.getElementById("teacherEmail").value;
-  await addDoc(collection(db, "teachers"), { name, email, bank: 0, earned: 0, isAdmin: false });
-};
+function renderDashboard(data, teacher) {
+  document.getElementById("welcome").textContent = `Welcome, ${teacher.name}${teacher.isAdmin ? " (Admin)" : ""}`;
+  document.getElementById("bankBalance").textContent = teacher.bankPoints;
+  document.getElementById("earnedBalance").textContent = teacher.earnedPoints;
 
-document.getElementById("addPrizeBtn").onclick = async () => {
-  const name = document.getElementById("prizeName").value;
-  const cost = parseInt(document.getElementById("prizeCost").value);
-  await addDoc(collection(db, "prizes"), { name, cost });
-};
+  initTabs(teacher.isAdmin);
+  renderAdmin(data, teacher);
 
-document.getElementById("sendRecognitionBtn").onclick = async () => {
-  const senderId = auth.currentUser.uid;
-  const recipientId = document.getElementById("recipientSelect").value;
-  const message = document.getElementById("messageInput").value;
-  const points = parseInt(document.getElementById("pointsInput").value);
-  await addDoc(collection(db, "recognitions"), { senderId, recipientId, message, points, timestamp: Date.now() });
-};
+  const receiverSelect = document.getElementById("receiverId");
+  const peers = data.teachers.filter((item) => item.id !== teacher.id);
+  receiverSelect.innerHTML = peers.length
+    ? `<option value="">Select a teacher</option>${peers.map((peer) => `<option value="${peer.id}">${peer.name}</option>`).join("")}`
+    : `<option value="">No other teachers yet</option>`;
 
-document.getElementById("redeemPrizeBtn").onclick = async () => {
-  const teacherId = auth.currentUser.uid;
-  const prizeId = document.getElementById("prizeSelect").value;
-  await addDoc(collection(db, "redemptions"), { teacherId, prizeId, timestamp: Date.now() });
-};
+  document.getElementById("recognitionForm").onsubmit = (event) => {
+    event.preventDefault();
+    const receiverId = Number(document.getElementById("receiverId").value);
+    const points = Number(document.getElementById("awardPoints").value);
+    const message = document.getElementById("awardMessage").value.trim();
+
+    if (!receiverId || Number.isNaN(points) || points <= 0) {
+      toast("Select a teacher and enter valid points.");
+      return;
+    }
+
+    if (teacher.bankPoints < points) {
+      toast("You do not have enough bank points to award that amount.");
+      return;
+    }
+
+    const receiver = data.teachers.find((item) => item.id === receiverId);
+    if (!receiver) {
+      toast("Teacher not found.");
+      return;
+    }
+
+    teacher.bankPoints -= points;
+    receiver.earnedPoints += points;
+    data.recognitions.unshift({ giverId: teacher.id, receiverId, points, message, date: new Date().toLocaleString() });
+    saveData(data);
+    renderDashboard(data, teacher);
+    activateTab("recognitions");
+  };
+
+  const prizeList = document.getElementById("prizeList");
+  prizeList.innerHTML = data.prizes.length
+    ? data.prizes
+        .map(
+          (prize) => `<div class="list-item">
+            <strong>${prize.name}</strong> (${prize.cost} pts)
+            <div>${prize.description}</div>
+            <button data-prize="${prize.id}" ${teacher.earnedPoints < prize.cost ? "disabled" : ""}>Redeem</button>
+          </div>`
+        )
+        .join("")
+    : '<div class="list-item">No prizes available yet. Admin can add prizes in the Admin tab.</div>';
+
+  prizeList.querySelectorAll("button[data-prize]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const prizeId = Number(button.dataset.prize);
+      const prize = data.prizes.find((item) => item.id === prizeId);
+      if (!prize) {
+        return;
+      }
+      if (teacher.earnedPoints < prize.cost) {
+        toast("Not enough earned points.");
+        return;
+      }
+
+      teacher.earnedPoints -= prize.cost;
+      data.redemptions.unshift({
+        teacherId: teacher.id,
+        prizeId,
+        cost: prize.cost,
+        date: new Date().toLocaleString(),
+        fulfilled: false,
+      });
+      saveData(data);
+      sendAdminRedemptionEmail(teacher, prize).then((sent) => {
+        if (!sent) {
+          toast("Redemption saved, but admin email notification was not sent. Check Netlify email function/env config.");
+        }
+      });
+      renderDashboard(data, teacher);
+      activateTab("redemptions");
+    });
+  });
+
+  const received = data.recognitions.filter((item) => item.receiverId === teacher.id);
+  document.getElementById("receivedList").innerHTML = received.length
+    ? received
+        .map((item) => {
+          const giver = data.teachers.find((t) => t.id === item.giverId);
+          return `<li class="list-item"><strong>${giver?.name || "Unknown"}</strong> gave ${item.points} points.
+            <div>${item.message || "No message"}</div>
+            <small>${item.date}</small>
+          </li>`;
+        })
+        .join("")
+    : '<li class="list-item">No recognitions yet.</li>';
+
+  const redemptions = data.redemptions.filter((item) => item.teacherId === teacher.id);
+  document.getElementById("redemptionList").innerHTML = redemptions.length
+    ? redemptions
+        .map((item) => {
+          const prize = data.prizes.find((prizeItem) => prizeItem.id === item.prizeId);
+          return `<li class="list-item">${prize?.name || "Prize"} - ${item.cost} points<br/><small>${item.date}</small><br/><small>${item.fulfilled ? `Handed out ${item.fulfilledAt || ""}` : "Pending admin handout"}</small></li>`;
+        })
+        .join("")
+    : '<li class="list-item">No redemptions yet.</li>';
+}
+
+
+function sendAdminRedemptionEmail(teacher, prize) {
+  return fetch("/.netlify/functions/send-redemption-email", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      teacherName: teacher.name,
+      teacherEmail: teacher.email,
+      prizeName: prize.name,
+      prizeCost: prize.cost,
+      redeemedAt: new Date().toLocaleString(),
+    }),
+  })
+    .then((response) => response.json())
+    .then((payload) => !!payload.sent)
+    .catch(() => false);
+}
+
+async function renderForUser(firebaseUser) {
+  if (!firebaseUser) {
+    renderHeader(null);
+    dashboardView.classList.add("hidden");
+    authView.classList.remove("hidden");
+    renderAuth();
+    return;
+  }
+
+  renderHeader(null);
+  dashboardView.classList.add("hidden");
+  authView.classList.remove("hidden");
+
+  const data = loadData();
+
+  if (!findTeacherByEmail(data.teachers, ADMIN_EMAIL)) {
+    const seededAdmin = createTeacher(data, { name: "Admin", email: ADMIN_EMAIL });
+    saveTeacherToCloud(seededAdmin).catch(() => {
+      // Non-blocking: local admin seed still allows sign-in on this device.
+    });
+  }
+
+  const currentEmail = normalizeEmail(firebaseUser.email);
+  const shouldHydrateCloudRoster = currentEmail === ADMIN_EMAIL;
+  if (shouldHydrateCloudRoster) {
+    const cloudTeachers = await loadAllTeachersFromCloud().catch(() => []);
+    cloudTeachers.forEach((cloudTeacher) => {
+      upsertLocalTeacherFromCloud(data, cloudTeacher);
+    });
+  }
+
+  let teacher = ensureTeacherRecord(data, firebaseUser);
+
+  if (!teacher) {
+    const cloudLookup = await loadTeacherFromCloudWithTimeout(firebaseUser.email);
+    if (cloudLookup.status === "found") {
+      teacher = upsertLocalTeacherFromCloud(data, cloudLookup.teacher);
+    } else if (cloudLookup.status === "timeout" || cloudLookup.status === "error") {
+      toast("We could not verify your teacher approval right now. Please check internet/Firebase Firestore and try again.");
+      renderHeader(null);
+      await forceLogoutToAuthView();
+      return;
+    }
+  }
+
+  if (!teacher) {
+    toast("Your account is not approved yet. Please ask the admin to add your teacher email first.");
+    renderHeader(null);
+    await forceLogoutToAuthView();
+    return;
+  }
+
+  saveData(data);
+
+  authView.classList.add("hidden");
+  dashboardView.classList.remove("hidden");
+  renderHeader(firebaseUser);
+  renderDashboard(data, teacher);
+}
+
+
+if (initFirebaseIfConfigured()) {
+  firebase.auth().onAuthStateChanged((user) => {
+    renderForUser(user).catch((error) => {
+      toast(`Unexpected sign-in error: ${error.message || error}`);
+    });
+  });
+} else {
+  renderForUser(null).catch(() => {
+    // no-op
+  });
+}
