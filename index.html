@@ -1,35 +1,158 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Staff Recognition App</title>
-  <link rel="stylesheet" href="styles.css" />
-</head>
-<body>
-  <h1>Staff Recognition</h1>
-  <button id="loginBtn">Login with Google</button>
-  <div id="adminPanel" class="hidden">
-    <h2>Admin Panel</h2>
-    <input type="text" id="teacherName" placeholder="Teacher Name" />
-    <input type="email" id="teacherEmail" placeholder="Teacher Email" />
-    <button id="addTeacherBtn">Add Teacher</button>
-    <input type="text" id="prizeName" placeholder="Prize Name" />
-    <input type="number" id="prizeCost" placeholder="Prize Cost" />
-    <button id="addPrizeBtn">Add Prize</button>
-  </div>
-  <div id="recognitionPanel" class="hidden">
-    <h2>Recognize a Teacher</h2>
-    <select id="recipientSelect"></select>
-    <input type="text" id="messageInput" placeholder="Message" />
-    <input type="number" id="pointsInput" placeholder="Points" />
-    <button id="sendRecognitionBtn">Send Recognition</button>
-  </div>
-  <div id="prizePanel" class="hidden">
-    <h2>Redeem a Prize</h2>
-    <select id="prizeSelect"></select>
-    <button id="redeemPrizeBtn">Redeem</button>
-  </div>
-  <script type="module" src="script.js"></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Staff Recognition Portal</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Staff Recognition Portal</h1>
+      <div id="authActions"></div>
+    </header>
+
+    <main class="page-wrap">
+      <section id="authView" class="auth-shell"></section>
+
+      <section id="dashboardView" class="hidden">
+        <div class="hero card">
+          <div>
+            <h2 id="welcome"></h2>
+            <p class="muted">Recognize your colleagues and redeem points for rewards.</p>
+          </div>
+          <div class="points-row">
+            <p class="points-pill">Bank: <strong id="bankBalance"></strong></p>
+            <p class="points-pill">Earned: <strong id="earnedBalance"></strong></p>
+          </div>
+        </div>
+
+        <nav class="tabbar card" id="dashboardTabs">
+          <button class="tab-btn active" data-tab="recognize">Award Points</button>
+          <button class="tab-btn" data-tab="prizes">Redeem Prizes</button>
+          <button class="tab-btn" data-tab="recognitions">Recognitions</button>
+          <button class="tab-btn" data-tab="redemptions">Redemptions</button>
+          <button class="tab-btn hidden" id="adminTabBtn" data-tab="admin">Admin</button>
+        </nav>
+
+        <section id="tab-recognize" class="tab-panel card">
+          <h3>Award points to a teacher</h3>
+          <p class="muted">Points come from your Bank balance.</p>
+          <form id="recognitionForm">
+            <label>
+              Teacher
+              <select id="receiverId" required></select>
+            </label>
+            <label>
+              Points
+              <input type="number" id="awardPoints" min="1" value="5" required />
+            </label>
+            <label>
+              Message
+              <textarea id="awardMessage" placeholder="Thanks for helping with planning period coverage!"></textarea>
+            </label>
+            <button type="submit">Send recognition</button>
+          </form>
+        </section>
+
+        <section id="tab-prizes" class="tab-panel card hidden">
+          <h3>Redeem prizes</h3>
+          <p class="muted">Only your Earned points can be used for redemption.</p>
+          <div id="prizeList" class="list"></div>
+        </section>
+
+        <section id="tab-recognitions" class="tab-panel card hidden">
+          <h3>Recognition you received</h3>
+          <ul id="receivedList" class="list"></ul>
+        </section>
+
+        <section id="tab-redemptions" class="tab-panel card hidden">
+          <h3>Your redemptions</h3>
+          <p class="muted">Admins are emailed on each redemption when Netlify email function is configured.</p>
+          <ul id="redemptionList" class="list"></ul>
+        </section>
+
+        <section id="tab-admin" class="tab-panel card hidden">
+          <h3>Admin Panel</h3>
+          <p class="admin-note">Manage teachers, prizes, and redemptions to hand out.</p>
+
+          <nav class="tabbar admin-subtabs" id="adminSubtabs">
+            <button class="tab-btn admin-tab-btn active" data-admin-tab="teachers">Teachers</button>
+            <button class="tab-btn admin-tab-btn" data-admin-tab="prizes">Prizes</button>
+            <button class="tab-btn admin-tab-btn" data-admin-tab="redemptions">Redemptions To Give</button>
+          </nav>
+
+          <section id="admin-teachers" class="admin-panel-section">
+            <div class="grid admin-grid">
+              <section class="mini-form admin-teacher-tools">
+                <h4>Teacher Setup</h4>
+                <form id="addTeacherForm">
+                  <label>Name <input type="text" id="teacherName" required /></label>
+                  <label>Email <input type="email" id="teacherEmail" required /></label>
+                  <button type="submit">Add teacher</button>
+                </form>
+              </section>
+            </div>
+
+            <section class="mini-form">
+              <h4>Teacher List</h4>
+              <ul id="adminTeacherList" class="list"></ul>
+            </section>
+          </section>
+
+          <section id="admin-prizes" class="admin-panel-section hidden">
+            <form id="addPrizeForm" class="mini-form">
+              <h4>Add Prize</h4>
+              <label>Prize name <input type="text" id="prizeName" required /></label>
+              <label>Description <input type="text" id="prizeDescription" required /></label>
+              <label>Cost points <input type="number" id="prizeCost" min="1" required /></label>
+              <button type="submit">Add prize</button>
+            </form>
+
+            <section class="mini-form">
+              <h4>Prize List</h4>
+              <ul id="adminPrizeList" class="list"></ul>
+            </section>
+          </section>
+
+          <section id="admin-redemptions" class="admin-panel-section hidden mini-form admin-redeem-queue">
+            <h4>Prizes To Hand Out</h4>
+            <p class="muted">Click the checkmark when a prize has been given to the teacher.</p>
+            <ul id="adminRedemptionQueue" class="list"></ul>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <template id="authTemplate">
+      <div class="auth-shell auth-fill">
+        <div class="card login-tile">
+          <h2>Teacher Login</h2>
+          <p>Sign in with your Google account to access recognition and rewards.</p>
+          <p id="hostNotice" class="warning hidden"></p>
+          <button id="googleLoginBtn" class="google-btn">Login with Google</button>
+          <small class="hint admin-email">Admin account: <code>cfluit29@plymouthchristian.us</code></small>
+        </div>
+      </div>
+    </template>
+
+    <div id="editModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="editModalTitle">
+      <div class="modal-card card">
+        <h3 id="editModalTitle"></h3>
+        <form id="editModalForm">
+          <div id="editModalFields" class="modal-fields"></div>
+          <div class="row">
+            <button type="submit" id="editModalSaveBtn">Save</button>
+            <button type="button" class="pill" id="editModalCancelBtn">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
+    <script src="firebase-config.js"></script>
+    <script src="script.js"></script>
+  </body>
 </html>
